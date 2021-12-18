@@ -5,83 +5,67 @@ library(nflfastR)
 library(scales)
 
 # Load data from one season
-# data <- readRDS(url('https://raw.githubusercontent.com/guga31bb/nflfastR-data/master/data/play_by_play_2019.rds'))
+nfl_data <- readRDS(url('https://raw.githubusercontent.com/guga31bb/nflfastR-data/master/data/play_by_play_2019.rds'))
 
 # Load data from multiple seasons
-season_txt <- "2010 - 2019"
-seasons <- 2010:2019
-data <- map_df(seasons, function(x) {
-  readRDS(
-    url(
-      paste0("https://raw.githubusercontent.com/guga31bb/nflfastR-data/master/data/play_by_play_",x,".rds")
-    )
-  )
-})
+# season_txt <- "2014 - 2019"
+# seasons <- 2014:2019
+# data <- map_df(seasons, function(x) {
+#   readRDS(
+#     url(
+#       paste0("https://raw.githubusercontent.com/guga31bb/nflfastR-data/master/data/play_by_play_",x,".rds")
+#     )
+#   )
+# })
 
-# Add column indicating if a play is a touchdown
-data <- data %>% mutate(td = !is.na(td_team))
-
-# Add column indicating is a play is a turnover, then column indicating if previous play is a turnover
-# This allows us to zero in on drives following forced turnovers
-data$turnover <- 0
-data$turnover[which(data$interception == 1 | data$fumble_lost == 1)] <- 1
-data$drive_after_turnover <- lag(data$turnover, n = 1)
-
-# Groups each drive and provides its starting field position (in ten-yard increments),
-# whether it follows a forced turnover, and if it results in a touchdown
-drive_touchdowns <- data[data$special == 0, ] %>%
-  group_by(game_id, drive) %>%
-  mutate(starting_position    = factor(ceiling(first(yardline_100) / 10), levels = c("1", "2", "3", "4", "5", "6", "7", "8", "9", "10")),
-         drive_after_turnover = first(drive_after_turnover)) %>% 
-  group_by(game_id, drive, starting_position, drive_after_turnover) %>%
-  summarize(touchdown = sum(td))
-drive_touchdowns <- drive_touchdowns[complete.cases(drive_touchdowns), ]
-
-# Gets the mean amount of drives that end in touchdowns for each ten-yard increment
-baseline_drives <- drive_touchdowns %>% 
-  group_by(starting_position) %>% 
-  summarize(td_percentage = mean(touchdown))
-after_turnover_drives <- drive_touchdowns[which(drive_touchdowns$drive_after_turnover == 1), ] %>% 
-  group_by(starting_position) %>% 
-  summarize(td_percentage = mean(touchdown))
-
-# Build the plot: Are drives following forced turnovers more likely to score touchdowns?
-ggplot(baseline_drives) +
-  geom_col(aes(starting_position, td_percentage, fill = "#5778a4")) +
-  geom_col(data = after_turnover_drives, aes(starting_position, td_percentage, fill = "#e49444"), width = 0.5) +
-  labs(title   = "Are NFL drives following forced turnovers more likely to score touchdowns?",
-       x       = "Starting yard line",
-       y       = "Percentage of drives ending in touchdowns",
-       caption = paste0("Data from ", season_txt, " NFL seasons")) +
-  scale_fill_manual(name    = "", 
-                    values  = c("#5778a4", "#e49444"), 
-                    labels  = c("All drives", "Drives following forced turnover")) +
-  scale_x_discrete(labels   = c('1-10','11-20','21-30','31-40','41-50','51-60','61-70','71-80','81-90','91-100')) +
-  scale_y_continuous(labels = scales::percent) +
-  theme_classic() +
-  theme(legend.position  = c(0.8, 0.85)) +
-  coord_cartesian(expand = FALSE)
+# 1) First-quarter drives
+nfl_q1_data <- nfl_data[which(nfl_data$game_half == "Half1" & nfl_data$play_type != "kickoff"), ] %>% 
+  group_by(game_id, drive) %>% 
+  mutate(drive_start_quarter = first(qtr),
+         starting_position   = factor(ceiling(first(yardline_100) / 10),
+                                      levels = c("1", "2", "3", "4", "5", "6", "7", "8", "9", "10"),
+                                      labels = c('1-10','11-20','21-30','31-40','41-50','51-60','61-70','71-80','81-90','91-100'))) %>% 
+  filter(drive_start_quarter == 1)
+# 2) Scored differential fewer than 10 points
+nfl_q1_data <- nfl_q1_data[which(abs(nfl_q1_data$score_differential) < 10), ]
 
 
+# Drive after big defensive plays
+nfl_q1_data$lagged_td <- lag(nfl_q1_data$touchdown, default = 0)
 
-# Maybe come back to this
-# temp <- data[, c("game_id", "drive", "desc", "drive_start_yard_line", "drive_end_yard_line","yardline_100", "touchdown")]
-# 
-# drive_data <- data[which(data$play_type == "pass" | data$play_type == "run"), ] %>%
-#   group_by(game_id, drive) %>%
-#   mutate(drive_yards_to_go = first(yardline_100),
-#          drive_final_yard_line = last(yardline_100),
-#          drive_percent_yards_gained = (drive_yards_to_go - drive_final_yard_line) / drive_yards_to_go) %>% 
-#   group_by(game_id, drive, drive_yards_to_go, drive_final_yard_line, drive_percent_yards_gained, drive_after_turnover) %>%
-#   summarize(touchdown = sum(td)) %>% 
-#   mutate(decile_yard_line = factor(ceiling(drive_yards_to_go / 10), levels = c("1", "2", "3", "4", "5", "6", "7", "8", "9", "10")),
-#          drive_percent_yards_gained = ifelse(touchdown == 1, 1, drive_percent_yards_gained))
-# 
-# ggplot(drive_data, aes(decile_yard_line, drive_percent_yards_gained, color = drive_after_turnover)) +
-#   # geom_jitter(alpha = 0.2, width = 0.1) +
-#   geom_point(aes(decile_yard_line, mean(drive_percent_yards_gained), color = drive_after_turnover))
-# 
-# 
-# stat_summary(fun.y = mean,
-#              geom = "point",
-#              color = "red")
+# 1) Drives after interceptions (remove pick-sixes)
+nfl_q1_data$lagged_interception <- lag(nfl_q1_data$interception, default = 0)
+nfl_q1_data <- nfl_q1_data %>% 
+  mutate(drive_after_interception = if_else(lagged_interception == 1 & lagged_td == 0, 1, 0))
+
+# 2) Fumble recovered by the defense
+nfl_q1_data$lagged_fumble_lost <- lag(nfl_q1_data$fumble_lost, default = 0)
+nfl_q1_data <- nfl_q1_data %>% 
+  mutate(drive_after_fumble_lost = if_else(lagged_fumble_lost == 1 & lagged_td == 0, 1, 0))
+
+# 3) 4th down stop (turnover on downs)
+nfl_q1_data$lagged_fourth_down_failed <- lag(nfl_q1_data$fourth_down_failed, default = 0)
+nfl_q1_data <- nfl_q1_data %>% 
+  mutate(drive_after_fourth_down_failed = if_else(lagged_fourth_down_failed == 1 & lagged_td == 0, 1, 0))
+
+# TODO: VERIFY THE STARTING FIELD POSITION AFTER THIS WORKS (bc a kickoff follows this)
+# 4) Safety
+nfl_q1_data$lagged_safety <- lag(nfl_q1_data$safety, default = 0)
+nfl_q1_data <- nfl_q1_data %>% 
+  mutate(drive_after_safety = if_else(lagged_safety == 1 & lagged_td == 0, 1, 0))
+
+# 5) Blocked field goal or punt
+nfl_q1_data$blocked_field_goal <- 0
+nfl_q1_data[which(nfl_q1_data$field_goal_result == "blocked"), "blocked_field_goal"] <- 1
+nfl_q1_data$lagged_blocked_field_goal <- lag(nfl_q1_data$blocked_field_goal, default = 0)
+nfl_q1_data$lagged_punt_blocked       <- lag(nfl_q1_data$punt_blocked,       default = 0)
+nfl_q1_data <- nfl_q1_data %>% 
+  mutate(drive_after_blocked_kick = if_else((lagged_blocked_field_goal == 1 | lagged_punt_blocked == 1) & lagged_td == 0, 1, 0))
+
+nfl_drives <- nfl_q1_data %>% 
+  group_by(game_id, drive, drive_start_quarter, starting_position) %>% 
+  summarize(drive_after_interception = sum(drive_after_interception),
+            drive_after_fumble_lost  = sum(drive_after_fumble_lost),
+            drive_after_fourth_down_failed = sum(drive_after_fourth_down_failed),
+            drive_after_safety = sum(drive_after_safety),
+            drive_after_blocked_kick = sum(drive_after_blocked_kick))
