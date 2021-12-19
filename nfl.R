@@ -19,7 +19,9 @@ nfl_data <- readRDS(url('https://raw.githubusercontent.com/guga31bb/nflfastR-dat
 # })
 
 # 1) First-quarter drives
-nfl_q1_data <- nfl_data[which(nfl_data$game_half == "Half1" & nfl_data$play_type != "kickoff"), ] %>% 
+nfl_q1_data <- nfl_data[which(nfl_data$game_half == "Half1" &
+                                nfl_data$play_type != "kickoff" &
+                                nfl_data$play_type != "no play"), ] %>% 
   group_by(game_id, drive) %>% 
   mutate(drive_start_quarter = first(qtr),
          starting_position   = factor(ceiling(first(yardline_100) / 10),
@@ -48,7 +50,6 @@ nfl_q1_data$lagged_fourth_down_failed <- lag(nfl_q1_data$fourth_down_failed, def
 nfl_q1_data <- nfl_q1_data %>% 
   mutate(drive_after_fourth_down_failed = if_else(lagged_fourth_down_failed == 1 & lagged_td == 0, 1, 0))
 
-# TODO: VERIFY THE STARTING FIELD POSITION AFTER THIS WORKS (bc a kickoff follows this)
 # 4) Safety
 nfl_q1_data$lagged_safety <- lag(nfl_q1_data$safety, default = 0)
 nfl_q1_data <- nfl_q1_data %>% 
@@ -62,10 +63,55 @@ nfl_q1_data$lagged_punt_blocked       <- lag(nfl_q1_data$punt_blocked,       def
 nfl_q1_data <- nfl_q1_data %>% 
   mutate(drive_after_blocked_kick = if_else((lagged_blocked_field_goal == 1 | lagged_punt_blocked == 1) & lagged_td == 0, 1, 0))
 
+
 nfl_drives <- nfl_q1_data %>% 
   group_by(game_id, drive, drive_start_quarter, starting_position) %>% 
-  summarize(drive_after_interception = sum(drive_after_interception),
-            drive_after_fumble_lost  = sum(drive_after_fumble_lost),
+  mutate(first_play_result = first(yards_gained)) %>% 
+  summarize(drive_after_interception       = sum(drive_after_interception),
+            drive_after_fumble_lost        = sum(drive_after_fumble_lost),
             drive_after_fourth_down_failed = sum(drive_after_fourth_down_failed),
-            drive_after_safety = sum(drive_after_safety),
-            drive_after_blocked_kick = sum(drive_after_blocked_kick))
+            drive_after_safety             = sum(drive_after_safety),
+            drive_after_blocked_kick       = sum(drive_after_blocked_kick),
+            first_play_yards_gained        = first(yards_gained),
+            first_play_touchdown           = first(touchdown),
+            first_play_safety              = first(safety),
+            first_play_interception        = first(interception),
+            first_play_fumble_lost         = first(fumble_lost)) %>%
+  mutate(BD_drive = factor(case_when(drive_after_interception       == 1 ~ "BD Drive",
+                                     drive_after_fumble_lost        == 1 ~ "BD Drive",
+                                     drive_after_fourth_down_failed == 1 ~ "BD Drive",
+                                     drive_after_safety             == 1 ~ "BD Drive",
+                                     drive_after_blocked_kick       == 1 ~ "BD Drive",
+                                     TRUE                                ~ "NBD Drive")),
+         # BD_drive = factor(BD_drive),
+         first_play = factor(case_when(first_play_safety       == 1  ~ "safety",
+                                       first_play_interception == 1  | first_play_fumble_lost == 1 ~ "turnover",
+                                       first_play_interception == 0  & first_play_fumble_lost == 0 & first_play_touchdown == 1 ~ "touchdown",
+                                       first_play_yards_gained <  0  ~ "loss of yardage",
+                                       first_play_yards_gained <= 3  ~ "0-3 yards gained",
+                                       first_play_yards_gained <= 6  ~ "4-6 yards gained",
+                                       first_play_yards_gained <= 9  ~ "7-9 yards gained",
+                                       first_play_yards_gained <= 29 ~ "10-29 yards gained",
+                                       first_play_yards_gained <= 49 ~ "30-49 yards gained",
+                                       first_play_yards_gained >= 50 ~ "50+ yards gained"),
+                             levels = c("safety", "turnover", "loss of yardage", "0-3 yards gained", "4-6 yards gained", "7-9 yards gained", "10-29 yards gained", "30-49 yards gained", "50+ yards gained", "touchdown")))
+nfl_drives <- nfl_drives[complete.cases(nfl_drives), ]
+summary(nfl_drives)
+str(nfl_drives)
+
+ggplot(nfl_drives, aes(BD_drive, fill = first_play)) +
+  geom_bar(position = "fill")
+options(scipen = 9999)
+
+proportions <- nfl_drives %>%
+  group_by(first_play, BD_drive) %>% 
+  summarize(count = n()) %>% 
+  ungroup() %>% 
+  mutate(prop = count/sum(count),
+         count = NULL)
+proportions <- spread(proportions, BD_drive, prop)
+write.excel <- function(x,row.names=FALSE,col.names=TRUE,...) {
+  write.table(x,"clipboard",sep="\t",row.names=row.names,col.names=col.names,...)
+}
+
+write.excel(proportions)
