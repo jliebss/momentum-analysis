@@ -5,20 +5,21 @@ library(nflfastR)
 library(scales)
 
 # Load data from one season
-nfl_data <- readRDS(url('https://raw.githubusercontent.com/guga31bb/nflfastR-data/master/data/play_by_play_2019.rds'))
+# nfl_data <- readRDS(url('https://raw.githubusercontent.com/guga31bb/nflfastR-data/master/data/play_by_play_2019.rds'))
 
 # Load data from multiple seasons
-# season_txt <- "2014 - 2019"
-# seasons <- 2014:2019
-# data <- map_df(seasons, function(x) {
-#   readRDS(
-#     url(
-#       paste0("https://raw.githubusercontent.com/guga31bb/nflfastR-data/master/data/play_by_play_",x,".rds")
-#     )
-#   )
-# })
+season_txt <- "2014 - 2019"
+seasons <- 2014:2019
+nfl_data <- map_df(seasons, function(x) {
+  readRDS(
+    url(
+      paste0("https://raw.githubusercontent.com/guga31bb/nflfastR-data/master/data/play_by_play_",x,".rds")
+    )
+  )
+})
 
 # 1) First-quarter drives
+labels <- c('1-10','11-20','21-30','31-40','41-50','51-60','61-70','71-80','81-90','91-100')
 nfl_q1_data <- nfl_data[which(nfl_data$game_half == "Half1" &
                                 nfl_data$play_type != "kickoff" &
                                 nfl_data$play_type != "no play"), ] %>% 
@@ -26,7 +27,7 @@ nfl_q1_data <- nfl_data[which(nfl_data$game_half == "Half1" &
   mutate(drive_start_quarter = first(qtr),
          starting_position   = factor(ceiling(first(yardline_100) / 10),
                                       levels = c("1", "2", "3", "4", "5", "6", "7", "8", "9", "10"),
-                                      labels = c('1-10','11-20','21-30','31-40','41-50','51-60','61-70','71-80','81-90','91-100'))) %>% 
+                                      labels = labels)) %>% 
   filter(drive_start_quarter == 1)
 # 2) Scored differential fewer than 10 points
 nfl_q1_data <- nfl_q1_data[which(abs(nfl_q1_data$score_differential) < 10), ]
@@ -65,8 +66,11 @@ nfl_q1_data <- nfl_q1_data %>%
 
 
 nfl_drives <- nfl_q1_data %>% 
-  group_by(game_id, drive, drive_start_quarter, starting_position) %>% 
-  mutate(first_play_result = first(yards_gained)) %>% 
+  mutate(made_field_goal = if_else(field_goal_result == "made", 1, 0), 
+         turnover        = case_when(interception    == 1 ~ 1,
+                                     fumble_lost     == 1 ~ 1),
+         defensive_touchdown = if_else(!is.na(touchdown) == 1 & !is.na(turnover) == 1, 1, 0)) %>% 
+  group_by(game_id, drive, drive_start_quarter, starting_position, drive_first_downs, drive_ended_with_score) %>% 
   summarize(drive_after_interception       = sum(drive_after_interception),
             drive_after_fumble_lost        = sum(drive_after_fumble_lost),
             drive_after_fourth_down_failed = sum(drive_after_fourth_down_failed),
@@ -76,15 +80,21 @@ nfl_drives <- nfl_q1_data %>%
             first_play_touchdown           = first(touchdown),
             first_play_safety              = first(safety),
             first_play_interception        = first(interception),
-            first_play_fumble_lost         = first(fumble_lost)) %>%
-  mutate(BD_drive = factor(case_when(drive_after_interception       == 1 ~ "BD Drive",
-                                     drive_after_fumble_lost        == 1 ~ "BD Drive",
-                                     drive_after_fourth_down_failed == 1 ~ "BD Drive",
-                                     drive_after_safety             == 1 ~ "BD Drive",
-                                     drive_after_blocked_kick       == 1 ~ "BD Drive",
-                                     TRUE                                ~ "NBD Drive")),
+            first_play_fumble_lost         = first(fumble_lost),
+            touchdown_on_drive             = sum(touchdown),
+            defensive_touchdown_on_drive   = sum(defensive_touchdown)
+            safety_on_drive                = sum(safety)) %>%
+  mutate(first_series_success = factor(if_else(drive_first_downs > 0 | drive_ended_with_score > 0, 1, 0)),
+         # defensive_touchdown  = factor(if_else())
+         BD_drive             = factor(case_when(drive_after_interception       == 1 ~ "BD_Drive",
+                                     drive_after_fumble_lost        == 1 ~ "BD_Drive",
+                                     drive_after_fourth_down_failed == 1 ~ "BD_Drive",
+                                     drive_after_safety             == 1 ~ "BD_Drive",
+                                     drive_after_blocked_kick       == 1 ~ "BD_Drive",
+                                     TRUE                                ~ "NBD_Drive")),
          # BD_drive = factor(BD_drive),
-         first_play = factor(case_when(first_play_safety       == 1  ~ "safety",
+         first_play           = factor(case_when(
+           # first_play_safety       == 1  ~ "safety",
                                        first_play_interception == 1  | first_play_fumble_lost == 1 ~ "turnover",
                                        first_play_interception == 0  & first_play_fumble_lost == 0 & first_play_touchdown == 1 ~ "touchdown",
                                        first_play_yards_gained <  0  ~ "loss of yardage",
@@ -99,19 +109,57 @@ nfl_drives <- nfl_drives[complete.cases(nfl_drives), ]
 summary(nfl_drives)
 str(nfl_drives)
 
+
+# ANALYSIS ONE: The first play after a BD
 ggplot(nfl_drives, aes(BD_drive, fill = first_play)) +
   geom_bar(position = "fill")
 options(scipen = 9999)
 
-proportions <- nfl_drives %>%
-  group_by(first_play, BD_drive) %>% 
-  summarize(count = n()) %>% 
-  ungroup() %>% 
-  mutate(prop = count/sum(count),
-         count = NULL)
-proportions <- spread(proportions, BD_drive, prop)
-write.excel <- function(x,row.names=FALSE,col.names=TRUE,...) {
-  write.table(x,"clipboard",sep="\t",row.names=row.names,col.names=col.names,...)
+group_by_first_play <- function(yard_decile, data) {
+  proportions <- nfl_drives[which(nfl_drives$starting_position == yard_decile), ] %>%
+    group_by(first_play, BD_drive) %>% 
+    summarize(count = n()) %>% spread(BD_drive, count) %>% 
+    mutate_all(~replace(., is.na(.), 0))
+  proportions[, -1] <- apply(proportions[, -1], 2, function(x) round(x/sum(x), 4))
+  return(proportions)
 }
 
-write.excel(proportions)
+lapply(labels, group_by_first_play, nfl_drives)
+group_by_first_play(TRUE, data)
+
+# # proportions <- spread(proportions, BD_drive, count) %>% 
+# #   na.omit()
+# proportions[, -1] <- apply(proportions[, -1], 2, function(x) round(x/sum(x), 4))
+# proportions
+# 
+# # Visualize results
+# z <- gather(proportions, bd_drive, prop, NBD_Drive:BD_Drive)
+# ggplot(z, aes(first_play, prop, fill = bd_drive)) +
+#   geom_col(position = "dodge") +
+#   coord_flip()
+
+
+# ANALYSIS TWO: The first set of downs after a BD
+proportions <- nfl_drives %>%
+  group_by(first_series_success, BD_drive) %>% 
+  summarize(count = n()) %>% spread(BD_drive, count) %>% 
+  mutate_all(~replace(., is.na(.), 0))
+proportions[, -1] <- apply(proportions[, -1], 2, function(x) round(x/sum(x), 4))
+proportions
+z <- gather(proportions, bd_drive, prop, NBD_Drive:BD_Drive)
+z
+ggplot(z, aes(first_series_success, prop, fill = bd_drive)) +
+  geom_col(position = "dodge")
+
+# ANALYSIS THREE: Points of drive
+
+
+
+
+
+# 
+# write.excel <- function(x,row.names=FALSE,col.names=TRUE,...) {
+#   write.table(x,"clipboard",sep="\t",row.names=row.names,col.names=col.names,...)
+# }
+# 
+# write.excel(proportions)
